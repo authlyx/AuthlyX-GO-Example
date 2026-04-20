@@ -54,11 +54,31 @@ func main() {
 		api = "https://authly.cc/api/v2"
 	}
 
+	ownerID := os.Getenv("AUTHLYX_OWNER_ID")
+	if ownerID == "" {
+		ownerID = "b49d11af8c42"
+	}
+
+	appName := os.Getenv("AUTHLYX_APP_NAME")
+	if appName == "" {
+		appName = "TEST"
+	}
+
+	version := os.Getenv("AUTHLYX_VERSION")
+	if version == "" {
+		version = "1.3"
+	}
+
+	secret := os.Getenv("AUTHLYX_SECRET")
+	if secret == "" {
+		secret = "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo"
+	}
+
 	AuthlyXApp := NewAuthlyX(
-		"12345678",
-		"MYAPP",
-		"1.3",
-		"your-secret",
+		ownerID,
+		appName,
+		version,
+		secret,
 		true,
 		api,
 	)
@@ -69,20 +89,31 @@ func main() {
 		return
 	}
 
-	AuthlyXApp.Login("username", "password", "")
-	showResult("Login", AuthlyXApp)
-	showUser(AuthlyXApp)
+	username := os.Getenv("AUTHLYX_USERNAME")
+	password := os.Getenv("AUTHLYX_PASSWORD")
 
-	AuthlyXApp.SetVariable("theme", "dark")
-	showResult("Set Variable", AuthlyXApp)
+	if username != "" && password != "" {
+		AuthlyXApp.Login(username, password, "")
+		showResult("Login", AuthlyXApp)
+		if AuthlyXApp.Response.Success {
+			showUser(AuthlyXApp)
 
-	val, _ := AuthlyXApp.GetVariable("theme")
-	showResult("Get Variable", AuthlyXApp)
-	if AuthlyXApp.Response.Success {
-		fmt.Println("Value:", val)
+			AuthlyXApp.SetVariable("theme", "dark")
+			showResult("Set Variable", AuthlyXApp)
+
+			val, _ := AuthlyXApp.GetVariable("theme")
+			showResult("Get Variable", AuthlyXApp)
+			if AuthlyXApp.Response.Success {
+				fmt.Println("Value:", val)
+			}
+
+			AuthlyXApp.ValidateSession()
+			showResult("Validate Session", AuthlyXApp)
+		}
+		return
 	}
 
-	AuthlyXApp.ValidateSession()
-	showResult("Validate Session", AuthlyXApp)
+	fmt.Println()
+	fmt.Println("Init completed.")
+	fmt.Println("Set AUTHLYX_USERNAME and AUTHLYX_PASSWORD if you want to run the authenticated examples.")
 }
-

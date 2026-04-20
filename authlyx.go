@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -20,13 +22,13 @@ import (
 )
 
 type Response struct {
-	Success    bool
-	Message    string
-	Raw        string
-	Code       string
-	StatusCode int
-	RequestID  string
-	Nonce      string
+	Success      bool
+	Message      string
+	Raw          string
+	Code         string
+	StatusCode   int
+	RequestID    string
+	Nonce        string
 	SignatureKID string
 }
 
@@ -51,14 +53,15 @@ type VariableData struct {
 }
 
 type UpdateData struct {
-	Available       bool
-	LatestVersion   string
-	DownloadUrl     string
-	ForceUpdate     bool
-	Changelog       string
-	ShowReminder    bool
-	ReminderMessage string
-	AllowedUntil    string
+	Available         bool
+	LatestVersion     string
+	DownloadUrl       string
+	AutoUpdateEnabled bool
+	ForceUpdate       bool
+	Changelog         string
+	ShowReminder      bool
+	ReminderMessage   string
+	AllowedUntil      string
 }
 
 type ChatMessage struct {
@@ -77,18 +80,18 @@ type ChatMessages struct {
 }
 
 type AuthlyX struct {
-	OwnerID  string
-	AppName  string
-	Version  string
-	Secret   string
-	BaseURL  string
-	Debug    bool
+	OwnerID string
+	AppName string
+	Version string
+	Secret  string
+	BaseURL string
+	Debug   bool
 
-	SessionID        string
-	ApplicationHash  string
-	Initialized      bool
-	CachedPublicIP   string
-	CachedIPExpires  time.Time
+	SessionID       string
+	ApplicationHash string
+	Initialized     bool
+	CachedPublicIP  string
+	CachedIPExpires time.Time
 
 	Response     Response
 	UserData     UserData
@@ -106,13 +109,13 @@ func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string
 	}
 
 	a := &AuthlyX{
-		OwnerID:     ownerID,
-		AppName:     appName,
-		Version:     version,
-		Secret:      secret,
-		BaseURL:     base,
-		Debug:       debug,
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		OwnerID:    ownerID,
+		AppName:    appName,
+		Version:    version,
+		Secret:     secret,
+		BaseURL:    base,
+		Debug:      debug,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	a.ApplicationHash = a.GetCurrentApplicationHash()
 	a.log("[SDK] AuthlyX initialized for app '" + a.AppName + "' using '" + a.BaseURL + "'.")
@@ -413,6 +416,7 @@ func (a *AuthlyX) Init() bool {
 	}
 
 	_, ok := a.postJSON("init", payload)
+	a.promptUpdateIfNeeded(strings.EqualFold(a.Response.Code, "UPDATE_REQUIRED"))
 	if ok && a.SessionID != "" {
 		a.Initialized = true
 	}
@@ -449,10 +453,10 @@ func (a *AuthlyX) LicenseLogin(licenseKey string) bool {
 		return false
 	}
 	payload := map[string]any{
-		"session_id":   a.SessionID,
-		"license_key":  licenseKey,
-		"sid":          a.GetSystemIdentifier(),
-		"ip":           a.GetPublicIP(),
+		"session_id":  a.SessionID,
+		"license_key": licenseKey,
+		"sid":         a.GetSystemIdentifier(),
+		"ip":          a.GetPublicIP(),
 	}
 	_, ok := a.postJSON("licenses", payload)
 	return ok
@@ -579,9 +583,9 @@ func (a *AuthlyX) GetChats(channelName string, limit int, cursor string) bool {
 		limit = 100
 	}
 	payload := map[string]any{
-		"session_id":    a.SessionID,
-		"channel_name":  channelName,
-		"limit":         limit,
+		"session_id":   a.SessionID,
+		"channel_name": channelName,
+		"limit":        limit,
 	}
 	if strings.TrimSpace(cursor) != "" {
 		payload["cursor"] = cursor
@@ -756,16 +760,244 @@ func (a *AuthlyX) loadVariableData(obj map[string]any) {
 func (a *AuthlyX) loadUpdateData(obj map[string]any) {
 	u, _ := obj["update"].(map[string]any)
 	if u == nil {
+		if obj["auto_update_enabled"] != nil || obj["auto_update_download_url"] != nil {
+			a.UpdateData.Available = true
+			a.UpdateData.LatestVersion = toString(obj["server_version"])
+			if strings.TrimSpace(a.UpdateData.LatestVersion) == "" {
+				a.UpdateData.LatestVersion = toString(obj["version"])
+			}
+			a.UpdateData.AutoUpdateEnabled = toBool(obj["auto_update_enabled"])
+			a.UpdateData.DownloadUrl = toString(obj["auto_update_download_url"])
+			a.UpdateData.ForceUpdate = toBool(obj["force_update"])
+		}
 		return
 	}
 	a.UpdateData.Available = toBool(u["available"])
 	a.UpdateData.LatestVersion = toString(u["latest_version"])
+	a.UpdateData.AutoUpdateEnabled = toBool(u["auto_update_enabled"])
 	a.UpdateData.DownloadUrl = toString(u["download_url"])
 	a.UpdateData.ForceUpdate = toBool(u["force_update"])
 	a.UpdateData.Changelog = toString(u["changelog"])
 	a.UpdateData.ShowReminder = toBool(u["show_reminder"])
 	a.UpdateData.ReminderMessage = toString(u["reminder_message"])
 	a.UpdateData.AllowedUntil = toString(u["allowed_until"])
+}
+
+func compareSemver(current, latest string) int {
+	strip := func(s string) string {
+		s = strings.TrimSpace(s)
+		if i := strings.IndexByte(s, '-'); i >= 0 {
+			s = s[:i]
+		}
+		return s
+	}
+
+	parse := func(s string) [3]int {
+		s = strip(s)
+		var out [3]int
+		parts := strings.Split(s, ".")
+		for i := 0; i < len(out) && i < len(parts); i++ {
+			n := 0
+			for _, r := range parts[i] {
+				if r < '0' || r > '9' {
+					break
+				}
+				n = n*10 + int(r-'0')
+			}
+			out[i] = n
+		}
+		return out
+	}
+
+	a := parse(current)
+	b := parse(latest)
+	for i := 0; i < 3; i++ {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+func openUrl(url string) {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		_ = exec.Command("cmd", "/c", "start", "", url).Start()
+	case "darwin":
+		_ = exec.Command("open", url).Start()
+	default:
+		_ = exec.Command("xdg-open", url).Start()
+	}
+}
+
+func (a *AuthlyX) shouldShowUpdatePrompt(forceShow bool) bool {
+	if !a.UpdateData.Available {
+		return false
+	}
+	if forceShow {
+		return true
+	}
+	if !a.isClientOutdated() {
+		return false
+	}
+	if !a.hasWhitelistedUpdateMessage() {
+		return false
+	}
+	return true
+}
+
+func (a *AuthlyX) isClientOutdated() bool {
+	if strings.TrimSpace(a.UpdateData.LatestVersion) == "" {
+		return false
+	}
+	return compareSemver(a.Version, a.UpdateData.LatestVersion) < 0
+}
+
+func (a *AuthlyX) hasWhitelistedUpdateMessage() bool {
+	return a.UpdateData.ShowReminder || strings.TrimSpace(a.UpdateData.AllowedUntil) != ""
+}
+
+func (a *AuthlyX) isAutoUpdateEnabled() bool {
+	return a.UpdateData.AutoUpdateEnabled
+}
+
+func formatDisplayDate(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	t, err := time.Parse(time.RFC3339, strings.ReplaceAll(raw, "Z", "+00:00"))
+	if err != nil {
+		return raw
+	}
+	return t.Format("January 2, 2006")
+}
+
+func (a *AuthlyX) buildWhitelistedUpdateMessage() string {
+	if strings.TrimSpace(a.UpdateData.AllowedUntil) != "" {
+		base := fmt.Sprintf("A new version is ready, and you can keep using this build until %s.", formatDisplayDate(a.UpdateData.AllowedUntil))
+		if !a.isAutoUpdateEnabled() {
+			return base
+		}
+		return base + "\n\nWould you like to download the latest version now?"
+	}
+
+	base := "A new version is ready, and you can still use this build for now."
+	if !a.isAutoUpdateEnabled() {
+		return base
+	}
+	return base + "\n\nWould you like to download the latest version now?"
+}
+
+func escapePowerShellString(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
+}
+
+func tryShowWindowsMessageBox(message string, yesNo bool) (string, bool) {
+	if runtime.GOOS != "windows" {
+		return "", false
+	}
+
+	button := "OK"
+	if yesNo {
+		button = "YesNo"
+	}
+	script := fmt.Sprintf(
+		"Add-Type -AssemblyName PresentationFramework; $result = [System.Windows.MessageBox]::Show('%s', 'AuthlyX Update', [System.Windows.MessageBoxButton]::%s, [System.Windows.MessageBoxImage]::Information); Write-Output $result",
+		escapePowerShellString(message),
+		button,
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+func (a *AuthlyX) showRequiredUpdateConsole() {
+	message := strings.TrimSpace(a.Response.Message)
+	if message == "" {
+		message = "Please update your app to the latest version."
+	}
+	fmt.Println(message)
+
+	if strings.TrimSpace(a.UpdateData.LatestVersion) != "" {
+		fmt.Printf("Latest version: %s\n", strings.TrimSpace(a.UpdateData.LatestVersion))
+	}
+
+	if !a.isAutoUpdateEnabled() || strings.TrimSpace(a.UpdateData.DownloadUrl) == "" {
+		return
+	}
+
+	fmt.Println("1. Download Latest")
+	fmt.Println("2. Exit")
+
+	if !stdinIsTerminal() {
+		return
+	}
+
+	fmt.Print("Select an option (1 or 2): ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	if line == "1" {
+		openUrl(strings.TrimSpace(a.UpdateData.DownloadUrl))
+	}
+}
+
+func (a *AuthlyX) promptUpdateIfNeeded(forceShow bool) {
+	if !a.shouldShowUpdatePrompt(forceShow) {
+		return
+	}
+
+	if forceShow {
+		a.showRequiredUpdateConsole()
+		return
+	}
+
+	msg := a.buildWhitelistedUpdateMessage()
+	downloadUrl := strings.TrimSpace(a.UpdateData.DownloadUrl)
+	useDownloadPrompt := a.isAutoUpdateEnabled() && downloadUrl != ""
+
+	if result, ok := tryShowWindowsMessageBox(msg, useDownloadPrompt); ok {
+		if useDownloadPrompt && strings.EqualFold(strings.TrimSpace(result), "Yes") {
+			openUrl(downloadUrl)
+		}
+		return
+	}
+
+	fmt.Println(msg)
+	if !useDownloadPrompt {
+		return
+	}
+
+	if !stdinIsTerminal() {
+		return
+	}
+
+	fmt.Print("Download the latest version now? (Y/N): ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+	if line == "y" || line == "yes" {
+		openUrl(downloadUrl)
+	}
 }
 
 func (a *AuthlyX) loadChatData(obj map[string]any) {

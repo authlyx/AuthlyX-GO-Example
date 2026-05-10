@@ -1,11 +1,15 @@
+// AuthlyX SDK Version 2.1
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/csv"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -86,6 +90,8 @@ type AuthlyX struct {
 	Secret  string
 	BaseURL string
 	Debug   bool
+	ServerPublicKeyDerBase64 string
+	RequireSignedResponses  bool
 
 	SessionID       string
 	ApplicationHash string
@@ -115,6 +121,8 @@ func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string
 		Secret:     secret,
 		BaseURL:    base,
 		Debug:      debug,
+		ServerPublicKeyDerBase64: "MCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=",
+		RequireSignedResponses:  false,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	a.ApplicationHash = a.GetCurrentApplicationHash()
@@ -323,6 +331,12 @@ func (a *AuthlyX) postJSON(endpoint string, payload map[string]any) (map[string]
 		return nil, false
 	}
 
+	canonicalResp, err := stableJSON(obj)
+	if err != nil || !a.verifySignedResponse(resp.Header, requestID, nonce, string(canonicalResp)) {
+		a.setFailure("AUTH_INVALID_SIGNATURE", "Response signature verification failed.", rawStr, resp.StatusCode)
+		return nil, false
+	}
+
 	success, _ := obj["success"].(bool)
 	a.Response.Success = success
 	if msg, _ := obj["message"].(string); msg != "" {
@@ -348,28 +362,83 @@ func (a *AuthlyX) postJSON(endpoint string, payload map[string]any) (map[string]
 }
 
 func stableJSON(m map[string]any) ([]byte, error) {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	return stableValue(m)
+}
 
-	buf := bytes.NewBufferString("{")
-	for i, k := range keys {
-		if i > 0 {
-			buf.WriteString(",")
+func stableValue(v any) ([]byte, error) {
+	switch typed := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for k := range typed {
+			keys = append(keys, k)
 		}
-		keyBytes, _ := json.Marshal(k)
-		valBytes, err := json.Marshal(m[k])
-		if err != nil {
-			return nil, err
+		sort.Strings(keys)
+		buf := bytes.NewBufferString("{")
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			keyBytes, _ := json.Marshal(k)
+			valBytes, err := stableValue(typed[k])
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(keyBytes)
+			buf.WriteString(":")
+			buf.Write(valBytes)
 		}
-		buf.Write(keyBytes)
-		buf.WriteString(":")
-		buf.Write(valBytes)
+		buf.WriteString("}")
+		return buf.Bytes(), nil
+	case []any:
+		buf := bytes.NewBufferString("[")
+		for i, item := range typed {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			itemBytes, err := stableValue(item)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(itemBytes)
+		}
+		buf.WriteString("]")
+		return buf.Bytes(), nil
+	default:
+		return json.Marshal(v)
 	}
-	buf.WriteString("}")
-	return buf.Bytes(), nil
+}
+
+func (a *AuthlyX) verifySignedResponse(headers http.Header, requestID, nonce, canonicalBody string) bool {
+	signature := headers.Get("x-v2-signature")
+	if signature == "" {
+		signature = headers.Get("x-auth-signature")
+	}
+	signatureTs := headers.Get("x-v2-signature-ts")
+	if signature == "" || signatureTs == "" {
+		return !a.RequireSignedResponses
+	}
+	if strings.TrimSpace(a.ServerPublicKeyDerBase64) == "" {
+		return !a.RequireSignedResponses
+	}
+
+	der, err := base64.StdEncoding.DecodeString(a.ServerPublicKeyDerBase64)
+	if err != nil {
+		return false
+	}
+	key, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return false
+	}
+	publicKey, ok := key.(ed25519.PublicKey)
+	if !ok {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	payload := []byte(signatureTs + "\n" + requestID + "\n" + nonce + "\n" + canonicalBody)
+	return ed25519.Verify(publicKey, payload, sig)
 }
 
 func int64ToString(v int64) string {

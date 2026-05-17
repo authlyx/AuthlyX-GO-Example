@@ -122,7 +122,7 @@ func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string
 		BaseURL:    base,
 		Debug:      debug,
 		ServerPublicKeyDerBase64: "MCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=",
-		RequireSignedResponses:  false,
+		RequireSignedResponses:  true,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	a.ApplicationHash = a.GetCurrentApplicationHash()

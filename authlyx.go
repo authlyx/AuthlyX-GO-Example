@@ -1,4 +1,4 @@
-// AuthlyX SDK Version 2.1
+// AuthlyX SDK Version 2.2
 package main
 
 import (
@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -95,6 +97,7 @@ type AuthlyX struct {
 
 	SessionID       string
 	ApplicationHash string
+	originalHash    string
 	Initialized     bool
 	CachedPublicIP  string
 	CachedIPExpires time.Time
@@ -106,6 +109,44 @@ type AuthlyX struct {
 	ChatMessages ChatMessages
 
 	httpClient *http.Client
+
+	heartbeatOnce  sync.Once
+	integrityOnce  sync.Once
+}
+
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	private := []net.IPNet{
+		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+	}
+	for _, block := range private {
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDomainHijacked(domain string) bool {
+	addrs, err := net.LookupHost(domain)
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip != nil && isPrivateIP(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildHTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: false}}
 }
 
 func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string) *AuthlyX {
@@ -123,9 +164,10 @@ func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string
 		Debug:      debug,
 		ServerPublicKeyDerBase64: "MCowBQYDK2VwAyEAgX5lXPhkadeQozyudzTxDXopdJxYexD5qZ0yEq9UOMU=",
 		RequireSignedResponses:  true,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: buildHTTPClient(),
 	}
 	a.ApplicationHash = a.GetCurrentApplicationHash()
+	a.originalHash = a.ApplicationHash
 	a.log("[SDK] AuthlyX initialized for app '" + a.AppName + "' using '" + a.BaseURL + "'.")
 	return a
 }
@@ -170,6 +212,14 @@ func (a *AuthlyX) log(content string) {
 
 	_ = os.MkdirAll(root, 0755)
 	logPath := filepath.Join(root, time.Now().UTC().Format("2006_01_02")+".log")
+
+	const maxLogSize = 5 * 1024 * 1024
+	if info, err := os.Stat(logPath); err == nil && info.Size() >= maxLogSize {
+		oldPath := logPath[:len(logPath)-4] + "_old.log"
+		_ = os.Remove(oldPath)
+		_ = os.Rename(logPath, oldPath)
+	}
+
 	line := "[" + time.Now().UTC().Format("15:04:05") + "] " + maskSensitive(content) + "\n"
 	_ = os.WriteFile(logPath, appendBytes(readFileBytes(logPath), []byte(line)), 0644)
 }
@@ -267,6 +317,10 @@ func (a *AuthlyX) postJSON(endpoint string, payload map[string]any) (map[string]
 		return nil, false
 	}
 
+	if isDomainHijacked("authly.cc") {
+		os.Exit(1)
+	}
+
 	requestID, nonce, ts, err := a.createSecurityContext()
 	if err != nil {
 		a.setFailure("SDK_ERROR", "Failed to create request metadata.", "", 0)
@@ -286,20 +340,32 @@ func (a *AuthlyX) postJSON(endpoint string, payload map[string]any) (map[string]
 	url := a.buildURL(endpoint)
 	a.log("[SDK][REQUEST] POST " + url + " " + string(bodyBytes))
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		a.setFailure("SDK_ERROR", "Failed to create request.", "", 0)
-		return nil, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "AuthlyX-Go-Client/"+a.Version)
-	req.Header.Set("x-request-id", requestID)
-	req.Header.Set("x-auth-nonce", nonce)
-	req.Header.Set("x-auth-timestamp", int64ToString(ts))
+	maxAttempts := 3
+	retryDelays := []time.Duration{1 * time.Second, 2 * time.Second}
 
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		a.setFailure("NETWORK_ERROR", "Network error: "+err.Error(), "", 0)
+	var resp *http.Response
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			a.setFailure("SDK_ERROR", "Failed to create request.", "", 0)
+			return nil, false
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "AuthlyX-Go-Client/"+a.Version)
+		req.Header.Set("x-request-id", requestID)
+		req.Header.Set("x-auth-nonce", nonce)
+		req.Header.Set("x-auth-timestamp", int64ToString(ts))
+
+		resp, err = a.httpClient.Do(req)
+		if err == nil {
+			break
+		}
+		a.log("[SDK] Network error on attempt " + intToString(attempt) + ": " + err.Error())
+		if attempt < maxAttempts {
+			time.Sleep(retryDelays[attempt-1])
+			continue
+		}
+		a.setFailure("NETWORK_ERROR", "Network error after "+intToString(maxAttempts)+" attempts: "+err.Error(), "", 0)
 		return nil, false
 	}
 	defer resp.Body.Close()
@@ -471,7 +537,49 @@ func strconvFormatInt(v int64) string {
 	return string(digits[i:])
 }
 
+func (a *AuthlyX) CheckBlacklist() bool {
+	if !a.ensureInitialized() {
+		return false
+	}
+	payload := map[string]any{
+		"session_id": a.SessionID,
+		"hwid":       a.GetSystemIdentifier(),
+		"ip":         a.GetPublicIP(),
+	}
+	_, ok := a.postJSON("blacklist/check", payload)
+	return ok
+}
+
+func (a *AuthlyX) startIntegrityHeartbeat() {
+	a.heartbeatOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				checkDebugger()
+			}
+		}()
+	})
+}
+
+func (a *AuthlyX) startExeIntegrityCheck() {
+	a.integrityOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(2 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				current := a.GetCurrentApplicationHash()
+				if current != a.originalHash {
+					os.Exit(1)
+				}
+			}
+		}()
+	})
+}
+
 func (a *AuthlyX) Init() bool {
+	checkDebugger()
+
 	if strings.TrimSpace(a.OwnerID) == "" || strings.TrimSpace(a.AppName) == "" || strings.TrimSpace(a.Version) == "" || strings.TrimSpace(a.Secret) == "" {
 		return a.setFailure("MISSING_CREDENTIALS", "Owner ID, app name, version, and secret are required.", "", 0)
 	}
@@ -489,6 +597,12 @@ func (a *AuthlyX) Init() bool {
 	if ok && a.SessionID != "" {
 		a.Initialized = true
 	}
+
+	if a.Initialized {
+		a.startIntegrityHeartbeat()
+		a.startExeIntegrityCheck()
+	}
+
 	return a.Initialized
 }
 
@@ -514,6 +628,9 @@ func (a *AuthlyX) UserLogin(username, password string) bool {
 		"ip":         a.GetPublicIP(),
 	}
 	_, ok := a.postJSON("login", payload)
+	if ok {
+		a.CheckBlacklist()
+	}
 	return ok
 }
 
@@ -528,6 +645,9 @@ func (a *AuthlyX) LicenseLogin(licenseKey string) bool {
 		"ip":          a.GetPublicIP(),
 	}
 	_, ok := a.postJSON("licenses", payload)
+	if ok {
+		a.CheckBlacklist()
+	}
 	return ok
 }
 
@@ -776,9 +896,16 @@ func (a *AuthlyX) loadUserData(obj map[string]any) {
 
 	if lic != nil {
 		a.UserData.LicenseKey = firstNonEmpty(toString(lic["license_key"]), a.UserData.LicenseKey)
+		if a.UserData.Username == "" {
+			a.UserData.Username = toString(lic["license_key"])
+		}
+		a.UserData.Email = firstNonEmpty(a.UserData.Email, toString(lic["email"]))
 		a.UserData.Subscription = firstNonEmpty(a.UserData.Subscription, toString(lic["subscription"]))
 		a.UserData.SubscriptionLevel = firstNonEmpty(a.UserData.SubscriptionLevel, toString(lic["subscription_level"]))
 		a.UserData.ExpiryDate = firstNonEmpty(a.UserData.ExpiryDate, toString(lic["expiry_date"]))
+		a.UserData.LastLogin = firstNonEmpty(a.UserData.LastLogin, toString(lic["last_login"]))
+		a.UserData.Hwid = firstNonEmpty(a.UserData.Hwid, toString(lic["hwid"]), toString(lic["sid"]))
+		a.UserData.IpAddress = firstNonEmpty(a.UserData.IpAddress, toString(lic["ip_address"]))
 	}
 
 	if dev != nil {
@@ -801,11 +928,22 @@ func (a *AuthlyX) loadUserData(obj map[string]any) {
 	a.UserData.DaysLeft = computeDaysLeft(a.UserData.ExpiryDate)
 }
 
+func parseDate(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339, strings.ReplaceAll(s, "Z", "+00:00")); err == nil {
+		return t, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, time.UTC); err == nil {
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("unrecognised date format: %s", s)
+}
+
 func computeDaysLeft(expiry string) int {
 	if strings.TrimSpace(expiry) == "" {
 		return 0
 	}
-	t, err := time.Parse(time.RFC3339, strings.ReplaceAll(expiry, "Z", "+00:00"))
+	t, err := parseDate(expiry)
 	if err != nil {
 		return 0
 	}
@@ -951,7 +1089,7 @@ func formatDisplayDate(raw string) string {
 	if raw == "" {
 		return raw
 	}
-	t, err := time.Parse(time.RFC3339, strings.ReplaceAll(raw, "Z", "+00:00"))
+	t, err := parseDate(raw)
 	if err != nil {
 		return raw
 	}

@@ -1,3 +1,4 @@
+// AuthlyX SDK V2.4
 //go:build windows
 
 package main

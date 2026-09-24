@@ -1,4 +1,4 @@
-// AuthlyX SDK Version 2.2
+// AuthlyX SDK V2.4
 package main
 
 import (
@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/csv"
 	"encoding/base64"
@@ -22,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -146,7 +148,27 @@ func isDomainHijacked(domain string) bool {
 }
 
 func buildHTTPClient() *http.Client {
-	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: false}}
+	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+		Proxy: nil, DisableKeepAlives: false,
+		TLSClientConfig: &tls.Config{VerifyConnection: verifyAuthlyXConnection},
+	}}
+}
+
+
+func verifyAuthlyXConnection(state tls.ConnectionState) error {
+	if !strings.EqualFold(strings.TrimSuffix(state.ServerName, "."), "authly.cc") {
+		return nil
+	}
+	for _, chain := range state.VerifiedChains {
+		for _, cert := range chain {
+			fingerprint := fmt.Sprintf("%X", sha256.Sum256(cert.Raw))
+			if fingerprint == "1DFC1605FBAD358D8BC844F76D15203FAC9CA5C1A79FD4857FFAF2864FBEBF96" ||
+				fingerprint == "76B27B80A58027DC3CF1DA68DAC17010ED93997D0B603E2FADBE85012493B5A7" {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("AuthlyX TLS certificate chain does not match a trusted pin")
 }
 
 func NewAuthlyX(ownerID, appName, version, secret string, debug bool, api string) *AuthlyX {
@@ -590,6 +612,7 @@ func (a *AuthlyX) Init() bool {
 		"version":  a.Version,
 		"secret":   a.Secret,
 		"hash":     a.GetCurrentApplicationHash(),
+		"ip":       a.GetPublicIP(),
 	}
 
 	_, ok := a.postJSON("init", payload)
@@ -904,7 +927,8 @@ func (a *AuthlyX) loadUserData(obj map[string]any) {
 		a.UserData.SubscriptionLevel = firstNonEmpty(a.UserData.SubscriptionLevel, toString(lic["subscription_level"]))
 		a.UserData.ExpiryDate = firstNonEmpty(a.UserData.ExpiryDate, toString(lic["expiry_date"]))
 		a.UserData.LastLogin = firstNonEmpty(a.UserData.LastLogin, toString(lic["last_login"]))
-		a.UserData.Hwid = firstNonEmpty(a.UserData.Hwid, toString(lic["hwid"]), toString(lic["sid"]))
+		a.UserData.RegisteredAt = firstNonEmpty(a.UserData.RegisteredAt, firstNonEmpty(toString(lic["registered_at"]), toString(lic["date_created"])))
+		a.UserData.Hwid = firstNonEmpty(a.UserData.Hwid, firstNonEmpty(toString(lic["hwid"]), toString(lic["sid"])))
 		a.UserData.IpAddress = firstNonEmpty(a.UserData.IpAddress, toString(lic["ip_address"]))
 	}
 
@@ -925,7 +949,28 @@ func (a *AuthlyX) loadUserData(obj map[string]any) {
 		a.UserData.IpAddress = a.GetPublicIP()
 	}
 
-	a.UserData.DaysLeft = computeDaysLeft(a.UserData.ExpiryDate)
+
+
+
+	rawDaysLeft := toString(obj["days_left"])
+	if rawDaysLeft == "" && user != nil {
+		rawDaysLeft = toString(user["days_left"])
+	}
+	if rawDaysLeft == "" && lic != nil {
+		rawDaysLeft = toString(lic["days_left"])
+	}
+	if rawDaysLeft == "" && dev != nil {
+		rawDaysLeft = toString(dev["days_left"])
+	}
+	if rawDaysLeft != "" {
+		if n, err := strconv.Atoi(rawDaysLeft); err == nil {
+			a.UserData.DaysLeft = n
+		} else {
+			a.UserData.DaysLeft = computeDaysLeft(a.UserData.ExpiryDate)
+		}
+	} else {
+		a.UserData.DaysLeft = computeDaysLeft(a.UserData.ExpiryDate)
+	}
 }
 
 func parseDate(s string) (time.Time, error) {

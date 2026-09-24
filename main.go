@@ -36,7 +36,7 @@ func showUser(a *AuthlyX) {
 	fmt.Printf("Days Left: %d\n", u.DaysLeft)
 	fmt.Printf("Last Login: %s\n", orNA(u.LastLogin))
 	fmt.Printf("Registered At: %s\n", orNA(u.RegisteredAt))
-	fmt.Printf("HWID/SID: %s\n", orNA(u.Hwid))
+	fmt.Printf("SID: %s\n", orNA(u.Hwid))
 	fmt.Printf("IP Address: %s\n", orNA(u.IpAddress))
 	fmt.Println("==============================================")
 }
@@ -56,7 +56,7 @@ func main() {
 
 	ownerID := os.Getenv("AUTHLYX_OWNER_ID")
 	if ownerID == "" {
-		ownerID = "b49d11af8c42"
+		ownerID = "1234567890"
 	}
 
 	appName := os.Getenv("AUTHLYX_APP_NAME")
@@ -66,12 +66,12 @@ func main() {
 
 	version := os.Getenv("AUTHLYX_VERSION")
 	if version == "" {
-		version = "1.3"
+		version = "1.0"
 	}
 
 	secret := os.Getenv("AUTHLYX_SECRET")
 	if secret == "" {
-		secret = "1L0edLKqHlFv0AL3NIQ7uPpikN2ECr7aZSHrNWMo"
+		secret = "examplesecret"
 	}
 
 	AuthlyXApp := NewAuthlyX(

@@ -1,139 +1,101 @@
 # AuthlyX Go SDK
 
-This is a Go authentication SDK for desktop and CLI applications that want simple integration with the AuthlyX API.
+Official Go SDK and console example for AuthlyX V3 (3.0.0 beta).
 
-This folder includes the SDK in `authlyx.go` and a runnable example in `main.go`.
+Full documentation: https://docs.authlyx.dev
 
 ## Requirements
 
-- Go `1.21` or later
+- Windows
+- Go 1.23 or newer
 
-## Quick Start
+## Run the example
 
-```go
-package main
-
-func main() {
-    AuthlyXApp := NewAuthlyX(
-        "12345678",
-        "MYAPP",
-        "1.0.0",
-        "your-secret",
-        true,
-        "https://authly.cc/api/v2",
-    )
-
-    AuthlyXApp.Init()
-}
-```
-
-## Optional Parameters
+Put your app key and version in `main.go`:
 
 ```go
-AuthlyXApp := NewAuthlyX(
-    "12345678",
-    "MYAPP",
-    "1.0.0",
-    "your-secret",
-    false,
-    "https://example.com/api/v2",
-)
+app, err := authlyx.NewAuthlyX(ctx, "YOUR_APP_KEY", "1.0.0")
 ```
 
-### Available options
+Then run it:
 
-- `debug`
-  - Default: `true`
-  - Set `false` to disable SDK logs
-
-- `api`
-  - Default: `https://authly.cc/api/v2`
-  - Use this for your custom domain
-
-## Available Methods
-
-- `Init()`
-- `Login(identifier, password, deviceType)`
-- `Register(username, password, licenseKey, email)`
-- `ChangePassword(oldPassword, newPassword)`
-- `ExtendTime(username, licenseKey)`
-- `GetVariable(key)`
-- `SetVariable(key, value)`
-- `Log(message)`
-- `GetChats(channelName, limit, cursor)`
-- `SendChat(message, channelName)`
-- `ValidateSession()`
-
-## Authentication Example
-
-```go
-// Username + password
-AuthlyXApp.Login("username", "password", "")
-
-// License key only
-AuthlyXApp.Login("XXXXX-XXXXX-XXXXX-XXXXX-XXXXX", "", "")
-
-// Device login
-AuthlyXApp.Login("YOUR_MOTHERBOARD_ID", "", "motherboard")
-```
-
-## Username Login Example
-
-```go
-AuthlyXApp.Login("username", "password", "")
-
-if AuthlyXApp.Response.Success {
-    println("Login success")
-    println(AuthlyXApp.UserData.Username)
-    println(AuthlyXApp.UserData.SubscriptionLevel)
-} else {
-    println(AuthlyXApp.Response.Message)
-}
-```
-
-## Variable Example
-
-```go
-AuthlyXApp.SetVariable("theme", "dark")
-
-value, _ := AuthlyXApp.GetVariable("theme")
-println(value)
-```
-
-## Logging
-
-By default, SDK logging is enabled.
-
-Logs are written to:
-
-`C:\ProgramData\AuthlyX\{AppName}\YYYY_MM_DD.log`
-
-To disable logs:
-
-```go
-AuthlyXApp := NewAuthlyX(
-    "12345678",
-    "MYAPP",
-    "1.0.0",
-    "your-secret",
-    false,
-    "https://authly.cc/api/v2",
-)
-```
-
-Sensitive values such as passwords, secrets, session IDs, request IDs, nonces, license keys, and hashes are masked automatically.
-
-## Example Project
-
-The runnable example in `main.go` uses the public test app by default for `Init()`.
-
-If you want to run the authenticated example too, set:
-
-- `AUTHLYX_USERNAME`
-- `AUTHLYX_PASSWORD`
-
-Then run:
-
-```powershell
+```bat
 go run .
 ```
+
+You can find your app key under your app's credentials in the [dashboard](https://dash.authlyx.dev).
+
+## Add it to your own project
+
+Copy the `sdk` folder into your project and point your `go.mod` at it:
+
+```go
+require github.com/authlyx/sdk-go/v3 v3.0.0
+
+replace github.com/authlyx/sdk-go/v3 => ./sdk
+```
+
+```go
+import authlyx "github.com/authlyx/sdk-go/v3"
+
+ctx := context.Background()
+app, err := authlyx.NewAuthlyX(ctx, "YOUR_APP_KEY", "1.0.0")
+if err != nil {
+    return err
+}
+defer app.Close()
+
+result, err := app.Initialize(ctx)
+if err != nil {
+    return err
+}
+if !result.Success {
+    return errors.New(result.Message)
+}
+```
+
+Every call returns `(Result, error)`. Check `err` first, then `Result.Success`.
+
+## Signing in
+
+```go
+result, err := app.Login(ctx, "YOUR_USERNAME", "YOUR_PASSWORD")
+result, err = app.LicenseLogin(ctx, "YOUR_LICENSE_KEY")
+result, err = app.DeviceLogin(ctx)
+```
+
+Device login signs in the current Windows user without a form. The device has to be approved in your app first. See [Device login](https://docs.authlyx.dev/guides/device-login).
+
+After signing in, the account details are in `userData`:
+
+```go
+user, err := app.UserData(ctx)
+username := user["Username"]
+plan := user["Plan"]
+expiry := user["ExpiryDate"]
+```
+
+Every method has its own page with examples under [SDK methods](https://docs.authlyx.dev/sdks/methods/login).
+
+## Offline access
+
+Once someone is signed in, saving offline access stores a signed permit on that PC:
+
+```go
+saved, err := app.SaveOfflineAccess(ctx)
+available := app.HasOfflineAccess(ctx)
+```
+
+If they open your app later without internet, they sign in with the same username and password or license key, and the SDK checks it against the saved permit. Each permit belongs to one app and one account, and signing out removes it. More in [Offline access](https://docs.authlyx.dev/guides/offline).
+
+## Errors
+
+`err` is set when AuthlyX could not be reached or something on the PC failed. When the server turns a request down, `err` is nil and `Result.Success` is false, with a `Code` and `Message` you can show to the user. All codes are listed in [Errors](https://docs.authlyx.dev/api-reference/errors).
+
+## Coming from 2.4
+
+V3 is a new SDK, not a drop-in update. Apps use an app key instead of the old owner ID, app name and secret, and the method names changed. Read [Move from V2 to V3](https://docs.authlyx.dev/api-reference/migration) before you switch.
+
+## License
+
+MIT. See `LICENSE.txt`.

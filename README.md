@@ -77,6 +77,33 @@ expiry := user["ExpiryDate"]
 
 Every method has its own page with examples under [SDK methods](https://docs.authlyx.dev/sdks/methods/login).
 
+## Starting up and updates
+
+`initialize()` returns one of these codes:
+
+| Code | Success | Meaning |
+| --- | --- | --- |
+| `APP_INITIALIZED` | Yes | Connected. Continue to sign-in. |
+| `OFFLINE_MODE` | Yes | No internet, but this PC has saved offline access. |
+| `NETWORK_...` | No | No internet and nothing saved. Offer to try again. |
+| `UPDATE_REQUIRED` | No | This version is older than the one set in your dashboard. |
+| `VERSION_MISMATCH` | No | This version is newer than the dashboard version and is not allowed. |
+
+On Windows the SDK shows update messages for you: an **Update required** or **Version not supported** box when this version is refused, and an **Update available** box once after sign-in when a newer release exists. Each one shows the release notes and offers to open the download page. Set versions and download links under your app's **Updates** settings in the [dashboard](https://dash.authlyx.dev).
+
+To show your own screen instead, turn the box off:
+
+```go
+options, err := authlyx.DefaultOptions("YOUR_APP_KEY", "1.0.0")
+if err != nil {
+    return err
+}
+options.NoUpdatePrompt = true
+app, err := authlyx.New(ctx, options)
+```
+
+The failed result's `update` data then has `version`, `notes` and `url`. More in [Updates](https://docs.authlyx.dev/guides/updates) and [Allowed Versions](https://docs.authlyx.dev/guides/allowed-versions).
+
 ## Offline access
 
 Once someone is signed in, saving offline access stores a signed permit on that PC:
@@ -86,11 +113,11 @@ saved, err := app.SaveOfflineAccess(ctx)
 available := app.HasOfflineAccess(ctx)
 ```
 
-If they open your app later without internet, they sign in with the same username and password or license key, and the SDK checks it against the saved permit. Each permit belongs to one app and one account, and signing out removes it. More in [Offline access](https://docs.authlyx.dev/guides/offline).
+If they open your app later without internet, `initialize()` succeeds with the code `OFFLINE_MODE`, and they sign in with the same username and password or license key, and the SDK checks it against the saved permit. Each permit belongs to one app and one account, and signing out removes it. More in [Offline access](https://docs.authlyx.dev/guides/offline).
 
 ## Errors
 
-`err` is set when AuthlyX could not be reached or something on the PC failed. When the server turns a request down, `err` is nil and `Result.Success` is false, with a `Code` and `Message` you can show to the user. All codes are listed in [Errors](https://docs.authlyx.dev/api-reference/errors).
+`initialize()` reports a missing connection in its result. For other calls, `err` is set when AuthlyX could not be reached or something on the PC failed. When the server turns a request down, `err` is nil and `Result.Success` is false, with a `Code` and `Message` you can show to the user. All codes are listed in [Errors](https://docs.authlyx.dev/api-reference/errors).
 
 ## Coming from 2.4
 
